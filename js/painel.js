@@ -41,13 +41,31 @@ let db,
 /* >>> [SERVIDOR/BD 3] Com servidor: gravar só a linha alterada, usar await/try-catch e mostrar erro; hoje
  *     falha de rede passaria despercebida.
  */
-const save = () => A[ADAPTER].save(db);
+const saveErro = () => toast('⚠ Não foi possível salvar os dados. Exporte um backup na aba Dados.');
+const save = () => {
+  try {
+    Promise.resolve(A[ADAPTER].save(db)).catch(saveErro);
+  } catch {
+    saveErro();
+  }
+};
 const VAZIO = () => ({ novo: [], transf: [], baixa: [] });
 /* >>> [SERVIDOR/BD 4] CARGA INICIAL: lê o banco (local/API) e, se vazio, começa com as tabelas vazias. Com BD:
  *     mostrar "carregando…" e tratar erro de conexão.
  */
 (async () => {
-  db = (await A[ADAPTER].load()) || VAZIO();
+  await Promise.resolve(); // deixa o resto do script (UTIL, REGRAS, TELAS) terminar de carregar antes de desenhar
+  let d = null;
+  try {
+    d = await A[ADAPTER].load();
+  } catch {
+    setTimeout(() => toast('⚠ Não foi possível ler os dados salvos; iniciando vazio.'), 0);
+  }
+  const valido = d && Array.isArray(d.novo) && Array.isArray(d.transf) && Array.isArray(d.baixa);
+  if (d && !valido) {
+    setTimeout(() => toast('⚠ Dados salvos em formato inesperado; iniciando vazio.'), 0);
+  }
+  db = valido ? d : VAZIO();
   render();
 })();
 
@@ -66,8 +84,15 @@ const T0 = () =>
 const pd = (x) => {
   x = t(x);
   const m = x.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
-  return /^\d{4}-\d\d-\d\d$/.test(x) ? x : '';
+  const iso = m
+    ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`
+    : /^\d{4}-\d\d-\d\d$/.test(x)
+      ? x
+      : '';
+  if (!iso) return '';
+  // rejeita datas impossíveis (ex.: 31/13/2026)
+  const d = new Date(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10));
+  return d.getMonth() === +iso.slice(5, 7) - 1 && d.getDate() === +iso.slice(8, 10) ? iso : '';
 };
 const toast = (m) => {
   const e = $('#toast');
@@ -193,6 +218,7 @@ function salvar(k, e, f) {
     ap = (x) => t(x) === '-';
   if (Object.values(e).every(vz) && Object.values(f).every(vz))
     return er('Nada para alterar: preencha ao menos um campo em "Corrigir para".');
+  if (ap(e.equip)) return er('O Equipamento não pode ficar vazio.');
   const ult = lastT(k);
   let dc, val, no, nd, ndt, uvl;
   if (!vz(e.dcomp)) {
@@ -243,6 +269,12 @@ function salvar(k, e, f) {
         'O tombamento ' +
           k +
           ' está duplicado e tem transferência/baixa; não dá para saber a qual se referem. Nada foi gravado.',
+      );
+    if (!nt && (rt.length || rb.length))
+      return er(
+        'Não dá para apagar o tombamento ' +
+          k +
+          ': há transferência/baixa ligada a ele. Nada foi gravado.',
       );
   }
   const m = [];
@@ -303,6 +335,10 @@ const TABS = [
 const go = (k) => {
   tab = k;
   render();
+};
+const abrir = (k) => {
+  ctomb = k;
+  go('dash');
 };
 const COLS = {
   novo: [
@@ -630,7 +666,11 @@ function eqv() {
         </tr>
         ${L.map(
           ({ r, s, l }) =>
-            /* HTML */ `<tr style="cursor:pointer" onclick="ctomb='${h(t(r.tomb))}';go('dash')">
+            /* HTML */ `<tr
+              style="cursor:pointer"
+              data-tomb="${h(t(r.tomb))}"
+              onclick="abrir(this.dataset.tomb)"
+            >
               <td>${h(t(r.tomb) || '—')}</td>
               <td>${h(t(r.equip))}</td>
               <td>${h(t(r.marca))}</td>
@@ -709,6 +749,12 @@ function renomearLinha(r, nw) {
         old +
         ' está duplicado e tem transferência/baixa; não dá para saber a qual se referem. Nada foi gravado.',
     );
+  if (!nw && (rt.length || rb.length))
+    return er(
+      'Não dá para apagar o tombamento ' +
+        old +
+        ': há transferência/baixa ligada a ele. Nada foi gravado.',
+    );
   r.tomb = nw;
   if (oc === 1) rt.concat(rb).forEach((z) => (z.tomb = nw));
   return ok('Tombamento alterado.');
@@ -775,19 +821,141 @@ const csv = (k) =>
 /* >>> [SERVIDOR/BD 9] IMPORTAR JSON: substitui db inteiro e chama save(). Com BD, enviar para o servidor
  *     validar e gravar em lote.
  */
+/* ---------- importação de JSON ----------
+   Aceita (1) o backup do próprio painel {novo, transf, baixa} e (2) listas de linhas exportadas da
+   planilha (ex.: aba "Novo Tombamento" convertida de CSV para JSON). Reconhece a tabela pelas colunas. */
+const semAcento = (s) =>
+  t(s)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s*\(.*?\)\s*/g, ' ')
+    .trim();
+const CAMPOS = {
+  novo: {
+    equipamento: 'equip',
+    marca: 'marca',
+    tombamento: 'tomb',
+    'unidade/setor': 'unid',
+    unidade: 'unid',
+    setor: 'unid',
+    'nota fiscal': 'nf',
+    'data compra': 'dcomp',
+    'validado patrimonio': 'val',
+  },
+  transf: {
+    data: 'data',
+    tombamento: 'tomb',
+    origem: 'orig',
+    destino: 'dest',
+    responsavel: 'resp',
+    observacao: 'obs',
+    'validado patrimonio': 'val',
+  },
+  baixa: {
+    'numero tombamento': 'tomb',
+    tombamento: 'tomb',
+    data: 'data',
+    'validado patrimonio': 'val',
+  },
+};
+const MOLDE = {
+  novo: () => ({ equip: '', marca: '', tomb: '', unid: '', nf: '', dcomp: '', val: false }),
+  transf: () => ({ data: '', tomb: '', orig: '', dest: '', resp: '', obs: '', val: false }),
+  baixa: () => ({ tomb: '', data: '', val: false }),
+};
+const NOMES = { novo: 'Novo Tombamento', transf: 'Transferência', baixa: 'Baixa' };
+const detectar = (c) =>
+  c.includes('origem') && c.includes('destino')
+    ? 'transf'
+    : c.includes('equipamento')
+      ? 'novo'
+      : c.includes('numero tombamento') || (c.includes('tombamento') && c.includes('data'))
+        ? 'baixa'
+        : null;
+const dataImp = (v) => {
+  const x = t(v).split(/[ T]/)[0];
+  return x ? pd(x) : '';
+};
+function converter(tabela, linhas) {
+  const r = { rows: [], vazias: 0, datas: [] };
+  linhas.forEach((l, idx) => {
+    const o = {};
+    Object.entries(l).forEach(([k, v]) => {
+      const c = CAMPOS[tabela][semAcento(k)];
+      if (!c) return;
+      if (c === 'val') o.val = v === true || ['true', 'sim', '1', 'verdadeiro'].includes(n(v));
+      else if (c === 'dcomp' || c === 'data') {
+        o[c] = dataImp(v);
+        if (t(v) && !o[c]) r.datas.push(t(l.Tombamento ?? l.tombamento) || 'linha ' + (idx + 2));
+      } else o[c] = t(v);
+    });
+    if (Object.entries(o).every(([k, v]) => k === 'val' || v === '')) r.vazias++;
+    else r.rows.push({ ...MOLDE[tabela](), ...o });
+  });
+  return r;
+}
+function interpretar(d) {
+  if (d && !Array.isArray(d) && ['novo', 'transf', 'baixa'].every((k) => Array.isArray(d[k])))
+    return { backup: true, tabelas: { novo: d.novo, transf: d.transf, baixa: d.baixa }, info: [] };
+  const listas = Array.isArray(d)
+    ? [['', d]]
+    : d && typeof d === 'object'
+      ? Object.entries(d).filter(([, v]) => Array.isArray(v))
+      : [];
+  if (!listas.length)
+    return {
+      erro: 'Formato não reconhecido: esperado o backup do painel ou uma lista de linhas da planilha.',
+    };
+  const tabelas = {};
+  const info = [];
+  for (const [, linhas] of listas) {
+    const objs = linhas.filter((l) => l && typeof l === 'object' && !Array.isArray(l));
+    if (!objs.length)
+      return { erro: 'A lista do arquivo está vazia ou não tem linhas com colunas.' };
+    const cols = [...new Set(objs.slice(0, 20).flatMap((l) => Object.keys(l)))];
+    const tabela = detectar(cols.map(semAcento));
+    if (!tabela)
+      return {
+        erro: `Não reconheci as colunas (${cols.slice(0, 6).join(', ')}). Esperado, por exemplo: EQUIPAMENTO, Marca, Tombamento, Unidade/Setor, NOTA FISCAL, DATA COMPRA, VALIDADO PATRIMONIO.`,
+      };
+    if (tabelas[tabela]) continue;
+    const c = converter(tabela, objs);
+    tabelas[tabela] = c.rows;
+    info.push(
+      `${NOMES[tabela]}: ${c.rows.length} linhas` +
+        (c.vazias ? `, ${c.vazias} em branco ignoradas` : '') +
+        (c.datas.length
+          ? `, ${c.datas.length} data(s) inválida(s) deixada(s) vazia(s) (${c.datas.slice(0, 5).join(', ')})`
+          : ''),
+    );
+  }
+  return { tabelas, info };
+}
 const imp = (i) => {
   const f = i.files[0];
   if (!f) return;
   f.text().then((x) => {
+    i.value = '';
+    let d;
     try {
-      const d = JSON.parse(x);
-      if (!d.novo || !d.transf || !d.baixa) throw 0;
-      db = d;
-      save();
-      render();
-      toast('✔ Dados importados.');
+      d = JSON.parse(x.replace(/^\uFEFF/, ''));
     } catch {
-      toast('⚠ Arquivo inválido.');
+      toast('⚠ O arquivo não é um JSON válido.');
+      return;
     }
+    const r = interpretar(d);
+    if (r.erro) {
+      toast('⚠ ' + r.erro);
+      return;
+    }
+    const nomes = Object.keys(r.tabelas)
+      .map((k) => `${NOMES[k]} (${r.tabelas[k].length} linhas)`)
+      .join(', ');
+    if (!confirm(`Substituir os dados atuais de: ${nomes}?`)) return;
+    db = { ...db, ...r.tabelas };
+    save();
+    render();
+    toast('✔ Importado. ' + (r.backup ? nomes : r.info.join(' · ')));
   });
 };
