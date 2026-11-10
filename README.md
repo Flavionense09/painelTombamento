@@ -4,6 +4,11 @@
 
 **Painel web para controlar tombamentos de equipamentos: cadastro, transferências entre lojas/setores, baixas e correções, tudo em uma única tela.**
 
+![HTML5](https://img.shields.io/badge/HTML5-E34F26?logo=html5&logoColor=white)
+![CSS3](https://img.shields.io/badge/CSS3-1572B6?logo=css3&logoColor=white)
+![JavaScript](https://img.shields.io/badge/JavaScript-F7DF1E?logo=javascript&logoColor=black)
+![Sem dependências](https://img.shields.io/badge/depend%C3%AAncias-nenhuma-10b981)
+![Servidor](https://img.shields.io/badge/servidor-n%C3%A3o%20necess%C3%A1rio-3b82f6)
 
 <img src="docs/dashboard.png" alt="Dashboard do painel de tombamentos" width="900">
 
@@ -42,13 +47,16 @@ Nenhum campo é bloqueado por lista fechada: **qualquer texto pode ser digitado 
 
 ## 🚀 Como executar
 
-1. Deixe os dois arquivos **na mesma pasta**.
+1. Mantenha a **estrutura de pastas** abaixo (o HTML carrega o CSS e o JavaScript por caminho relativo).
 2. Abra o `tombamentos_painel.html` no navegador (duplo clique).
 
 ```text
 📁 sua-pasta/
-├── 📄 tombamentos_painel.html   ← o painel (HTML + CSS + JavaScript)
-├── 📄 dados_iniciais.js         ← dados de partida (equipamentos, transferências, baixas)
+├── 📄 tombamentos_painel.html   ← estrutura da página (HTML)
+├── 📁 css/
+│   └── 🎨 estilos.css           ← aparência do painel (CSS)
+├── 📁 js/
+│   └── ⚙️ painel.js             ← lógica do painel (JavaScript)
 └── 📁 docs/
     └── 🖼️ dashboard.png         ← imagem usada neste README
 ```
@@ -56,7 +64,7 @@ Nenhum campo é bloqueado por lista fechada: **qualquer texto pode ser digitado 
 > **Sem instalação, sem servidor, sem internet.** Não há bibliotecas externas nem CDN.
 > Testado no Chromium. Use um navegador atual (Chrome, Edge, Firefox ou Safari recentes).
 
-Se o `dados_iniciais.js` não estiver na pasta, o painel abre **vazio**.
+O painel **abre vazio** na primeira vez: cadastre os equipamentos pelo Dashboard ou traga dados existentes com **Importar JSON**, na aba **Dados**.
 
 ---
 
@@ -71,7 +79,7 @@ O menu superior alterna entre as telas:
 | **Novo Tombamento** | Tabela de equipamentos, editável nas células |
 | **Transferência** | Tabela de transferências, editável nas células |
 | **Baixa** | Tabela de baixas, editável nas células |
-| **Dados** | Backup, importação, exportação em CSV e restauração dos dados iniciais |
+| **Dados** | Backup, importação e exportação em CSV |
 
 ### Dashboard em detalhe
 
@@ -174,7 +182,6 @@ Digite ou escolha um tombamento. A tabela mostra os valores **Atuais** e a colun
 | **Exportar tudo (JSON)** | Baixa `tombamentos_backup.json` com as três tabelas |
 | **Importar JSON** | Substitui os dados atuais (o arquivo precisa ter `novo`, `transf` e `baixa`) |
 | **CSV novo / transf / baixa** | Uma tabela em CSV (separador `;`, UTF-8 com BOM, abre direto no Excel) |
-| **Restaurar dados iniciais** | Volta ao conteúdo do `dados_iniciais.js` (pede confirmação) |
 
 </details>
 
@@ -229,39 +236,43 @@ Datas são guardadas como `aaaa-mm-dd` e exibidas como `dd/mm/aaaa`. O tombament
 
 ```mermaid
 flowchart LR
-    A["dados_iniciais.js<br/>window.SEED"] -- "1ª abertura<br/>(se vazio)" --> B[("localStorage<br/>chave: tomb_db")]
-    B <--> C["Painel<br/>(memória: db)"]
-    C -- exportar --> D["JSON / CSV"]
-    D -- importar --> C
+    A["Painel<br/>(memória: db)"] <--> B[("localStorage<br/>chave: tomb_db")]
+    A -- exportar --> C["JSON / CSV"]
+    C -- importar JSON --> A
 ```
 
-- Na **primeira abertura**, os dados vêm do `dados_iniciais.js` e são copiados para o `localStorage` do navegador.
-- A partir daí, **cada alteração é salva automaticamente** no `localStorage`.
+- Na **primeira abertura** não há dados: as três tabelas começam vazias.
+- **Cada alteração é salva automaticamente** no `localStorage`.
 - Os dados ficam **neste navegador, neste computador**. Para mover ou guardar, use **Exportar tudo (JSON)**.
 
 ---
 
 ## 🧩 Estrutura do código
 
-Tudo está em um único `tombamentos_painel.html`, com o código organizado em seções comentadas.
+O código é dividido em **três arquivos**, cada um com uma responsabilidade, e organizado em seções comentadas.
+
+| Arquivo | Responsabilidade |
+|---|---|
+| `tombamentos_painel.html` | Esqueleto da página (21 linhas) |
+| `css/estilos.css` | Toda a aparência |
+| `js/painel.js` | Dados, regras, processos e telas |
 
 ### HTML
 
 ```html
-<head>   <!-- meta, título e <style> -->
+<head>   <!-- meta, título e <link rel="stylesheet" href="css/estilos.css"> -->
 <body>
   <header>  <!-- título, relógio (#clk) e menu (#nav) -->
   <main id="app">   <!-- a tela atual é desenhada aqui -->
   <div id="toast">  <!-- aviso temporário -->
-  <script src="dados_iniciais.js">   <!-- dados de partida -->
-  <script> ... </script>             <!-- lógica do painel -->
+  <script src="js/painel.js">   <!-- lógica do painel -->
 ```
 
 O HTML é praticamente um esqueleto: as telas são montadas pelo JavaScript dentro de `#app`.
 
 ### CSS
 
-Seções comentadas, nesta ordem: *Variáveis de cor · Cabeçalho e navegação · Layout geral e cartões · Indicadores · Formulários e campos · Tabelas · Etiquetas de situação · Gráficos · Aviso temporário · Responsivo*.
+Em `css/estilos.css`, seções comentadas, nesta ordem: *Variáveis de cor · Cabeçalho e navegação · Layout geral e cartões · Indicadores · Formulários e campos · Tabelas · Etiquetas de situação · Gráficos · Aviso temporário · Responsivo*.
 
 | Variável | Uso |
 |---|---|
@@ -276,7 +287,7 @@ Seções comentadas, nesta ordem: *Variáveis de cor · Cabeçalho e navegação
 
 ### JavaScript
 
-O script é dividido em seções:
+`js/painel.js` é dividido em seções:
 
 | Seção | O que contém |
 |---|---|
@@ -318,13 +329,13 @@ Toda leitura e gravação passam por um único adaptador, escolhido em uma linha
 const ADAPTER = 'local'; // 'local' = localStorage do navegador
 ```
 
-Os pontos do código preparados para uma futura integração com servidor e banco estão marcados com comentários `[SERVIDOR/BD n]`. Para listá-los, busque por `[SERVIDOR/BD` no arquivo.
+Os pontos do código preparados para uma futura integração com servidor e banco estão marcados com comentários `[SERVIDOR/BD n]`. Para listá-los, busque por `[SERVIDOR/BD` em `js/painel.js`.
 
 ---
 
 ## ⚠️ Observações importantes
 
 - 💾 **Faça backups.** Os dados vivem no `localStorage` do navegador: limpar os dados do navegador apaga o painel. Use **Exportar tudo (JSON)** com frequência.
-- 🖥️ **Um navegador, um computador.** Abrir o painel em outro navegador ou máquina começa a partir do `dados_iniciais.js`.
+- 🖥️ **Um navegador, um computador.** Abrir o painel em outro navegador ou máquina começa **vazio**; para levar os dados, exporte o JSON e importe no outro lugar.
 - 🔁 **Tombamentos duplicados** são tratados como o mesmo equipamento nas regras de situação (as duas linhas aparecem como transferidas). Por isso o alerta ⚠: corrija o número pela consulta.
 - 👥 **Uso individual.** Não há login nem controle de acesso: o painel foi pensado para uma pessoa por vez no próprio computador.
