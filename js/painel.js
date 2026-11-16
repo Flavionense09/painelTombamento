@@ -36,18 +36,39 @@ let db,
   ctomb = '',
   msgs = {},
   fq = '',
-  fs = '';
+  fs = '',
+  ff = { uf: '', cidade: '' }, // filtro vindo do mapa (estado/cidade)
+  ufSel = '',
+  mapaDados = { estados: {}, pontos: [], sem: 0, semCoord: 0, total: 0 };
 /* >>> [SERVIDOR/BD 3] PONTO ÚNICO DE GRAVAÇÃO: todo save() grava o banco inteiro (snapshot) e NÃO é aguardado. */
 /* >>> [SERVIDOR/BD 3] Com servidor: gravar só a linha alterada, usar await/try-catch e mostrar erro; hoje
  *     falha de rede passaria despercebida.
  */
-const save = () => A[ADAPTER].save(db);
+const saveErro = () => toast('⚠ Não foi possível salvar os dados. Exporte um backup na aba Dados.');
+const save = () => {
+  try {
+    Promise.resolve(A[ADAPTER].save(db)).catch(saveErro);
+  } catch {
+    saveErro();
+  }
+};
 const VAZIO = () => ({ novo: [], transf: [], baixa: [] });
 /* >>> [SERVIDOR/BD 4] CARGA INICIAL: lê o banco (local/API) e, se vazio, começa com as tabelas vazias. Com BD:
  *     mostrar "carregando…" e tratar erro de conexão.
  */
 (async () => {
-  db = (await A[ADAPTER].load()) || VAZIO();
+  await Promise.resolve(); // deixa o resto do script (UTIL, REGRAS, TELAS) terminar de carregar antes de desenhar
+  let d = null;
+  try {
+    d = await A[ADAPTER].load();
+  } catch {
+    setTimeout(() => toast('⚠ Não foi possível ler os dados salvos; iniciando vazio.'), 0);
+  }
+  const valido = d && Array.isArray(d.novo) && Array.isArray(d.transf) && Array.isArray(d.baixa);
+  if (d && !valido) {
+    setTimeout(() => toast('⚠ Dados salvos em formato inesperado; iniciando vazio.'), 0);
+  }
+  db = valido ? d : VAZIO();
   render();
 })();
 
@@ -66,8 +87,15 @@ const T0 = () =>
 const pd = (x) => {
   x = t(x);
   const m = x.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
-  return /^\d{4}-\d\d-\d\d$/.test(x) ? x : '';
+  const iso = m
+    ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`
+    : /^\d{4}-\d\d-\d\d$/.test(x)
+      ? x
+      : '';
+  if (!iso) return '';
+  // rejeita datas impossíveis (ex.: 31/13/2026)
+  const d = new Date(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10));
+  return d.getMonth() === +iso.slice(5, 7) - 1 && d.getDate() === +iso.slice(8, 10) ? iso : '';
 };
 const toast = (m) => {
   const e = $('#toast');
@@ -80,6 +108,15 @@ setInterval(() => {
   const e = $('#clk');
   if (e) e.textContent = new Date().toLocaleString('pt-BR');
 }, 1000);
+
+// texto sem acentos/maiúsculas e sem o que estiver entre parênteses (usado em UF, cidades e importação)
+const semAcento = (s) =>
+  t(s)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s*\(.*?\)\s*/g, ' ')
+    .trim();
 
 /* ================= REGRAS (equivalentes às fórmulas do Sheets) ================= */
 /* >>> [SERVIDOR/BD 5] REGRAS DE NEGÓCIO (situação, local atual, duplicados, última transferência) calculadas
@@ -126,6 +163,29 @@ const cl = (s) => s.replace(/ /g, '_'),
   E0 = () => ({ equip: '', marca: '', tomb: '', unid: '', nf: '', dcomp: '', val: '' });
 
 /* ================= PROCESSOS (equivalentes ao cadastro_dashboard.gs) ================= */
+/* ---------- estados (UF) e cidades ---------- */
+const UFS = (window.BR_ESTADOS || []).map(({ uf, nome }) => ({ uf, nome }));
+const cidadesDe = (uf) => (window.BR_CIDADES || {})[uf] || [];
+// aceita a sigla (MA) ou o nome (Maranhão); '' = vazio; null = inválido
+const normUF = (x) => {
+  const q = semAcento(x);
+  if (!q) return '';
+  const e = UFS.find((u) => u.uf.toLowerCase() === q || semAcento(u.nome) === q);
+  return e ? e.uf : null;
+};
+const canonCidade = (uf, c) => {
+  const q = semAcento(c),
+    m = cidadesDe(uf).find((x) => semAcento(x[0]) === q);
+  return m ? m[0] : t(c);
+};
+function validarLocal(ufIn, cidIn) {
+  const uf = normUF(ufIn);
+  if (uf === null)
+    return { erro: 'Estado inválido: ' + t(ufIn) + '. Use a sigla (ex.: MA) ou o nome.' };
+  const cidade = t(cidIn);
+  if (cidade && !uf) return { erro: 'Informe o estado (UF) da cidade.' };
+  return { uf, cidade: cidade ? canonCidade(uf, cidade) : '' };
+}
 /* >>> [SERVIDOR/BD 6] PROCESSOS (cadastrar/registrar/baixar/salvar): hoje validam e alteram db.* em memória. */
 /* >>> [SERVIDOR/BD 6] Com servidor: cada um vira uma chamada (POST/PATCH) que valida de novo e grava numa
  *     transação; a resposta {ok,m} pode ser mantida.
@@ -138,11 +198,15 @@ function cadastrar(v) {
   if (!eq || !un) return er('Preencha ao menos Equipamento e Unidade/Setor.');
   if (tb && db.novo.some((r) => t(r.tomb) === tb))
     return er('O tombamento ' + tb + ' já está cadastrado. Nada foi gravado.');
+  const lg = validarLocal(v.uf, v.cidade);
+  if (lg.erro) return er(lg.erro);
   db.novo.push({
     equip: eq,
     marca: t(v.marca),
     tomb: tb,
     unid: un,
+    uf: lg.uf,
+    cidade: lg.cidade,
     nf: t(v.nf),
     dcomp: v.dcomp || '',
     val: false,
@@ -158,11 +222,15 @@ function registrar(v) {
   if (!e) return er('Tombamento ' + tb + ' não encontrado em Novo Tombamento.');
   const og = t(v.orig) || loc(e);
   if (n(og) === n(ds)) return er('Origem e destino são iguais (' + ds + '). Nada foi gravado.');
+  const lg = validarLocal(v.uf, v.cidade);
+  if (lg.erro) return er(lg.erro);
   db.transf.push({
     data: v.data || T0(),
     tomb: tb,
     orig: og,
     dest: ds,
+    uf: lg.uf,
+    cidade: lg.cidade,
     resp: t(v.resp),
     obs: t(v.obs),
     val: false,
@@ -193,8 +261,9 @@ function salvar(k, e, f) {
     ap = (x) => t(x) === '-';
   if (Object.values(e).every(vz) && Object.values(f).every(vz))
     return er('Nada para alterar: preencha ao menos um campo em "Corrigir para".');
+  if (ap(e.equip)) return er('O Equipamento não pode ficar vazio.');
   const ult = lastT(k);
-  let dc, val, no, nd, ndt, uvl;
+  let dc, val, no, nd, ndt, uvl, nuf, ncid;
   if (!vz(e.dcomp)) {
     dc = ap(e.dcomp) ? '' : pd(e.dcomp);
     if (!ap(e.dcomp) && !dc) return er('Data da compra inválida. Use dd/mm/aaaa.');
@@ -213,6 +282,20 @@ function salvar(k, e, f) {
   if (!vz(f.data)) {
     ndt = ap(f.data) ? '' : pd(f.data);
     if (!ap(f.data) && !ndt) return er('Data da transferência inválida. Use dd/mm/aaaa.');
+  }
+  // estado/cidade do local atual: última transferência; sem transferência, o próprio cadastro
+  const alvoGeo = ult || row;
+  if (!vz(f.uf)) {
+    nuf = ap(f.uf) ? '' : normUF(f.uf);
+    if (nuf === null)
+      return er('Estado inválido: ' + t(f.uf) + '. Use a sigla (ex.: MA) ou o nome.');
+  }
+  if (!vz(f.cidade)) ncid = ap(f.cidade) ? '' : t(f.cidade);
+  if (nuf !== undefined || ncid !== undefined) {
+    const ufFinal = nuf !== undefined ? nuf : t(alvoGeo.uf);
+    if (ncid && !ufFinal) return er('Informe o estado (UF) da cidade.');
+    if (ncid) ncid = canonCidade(ufFinal, ncid);
+    if (nuf !== undefined && nuf !== t(alvoGeo.uf) && ncid === undefined) ncid = ''; // trocou de estado: a cidade antiga deixa de valer
   }
   if (!ult) {
     if (no !== undefined || ndt !== undefined)
@@ -243,6 +326,12 @@ function salvar(k, e, f) {
         'O tombamento ' +
           k +
           ' está duplicado e tem transferência/baixa; não dá para saber a qual se referem. Nada foi gravado.',
+      );
+    if (!nt && (rt.length || rb.length))
+      return er(
+        'Não dá para apagar o tombamento ' +
+          k +
+          ': há transferência/baixa ligada a ele. Nada foi gravado.',
       );
   }
   const m = [];
@@ -282,6 +371,14 @@ function salvar(k, e, f) {
     row.unid = uvl;
     m.push('Local atual (Unidade/Setor)');
   }
+  if (nuf !== undefined) {
+    alvoGeo.uf = nuf;
+    m.push('Estado');
+  }
+  if (ncid !== undefined) {
+    alvoGeo.cidade = ncid;
+    m.push('Cidade');
+  }
   if (mt) {
     row.tomb = nt;
     rt.concat(rb).forEach((r) => (r.tomb = nt));
@@ -290,6 +387,149 @@ function salvar(k, e, f) {
   return { ...ok('Salvo (' + m.join(', ') + ').'), k: mt ? nt : k };
 }
 /* liberarTextoLivre: aqui nenhum campo é bloqueado; as listas (datalist) são só sugestões. */
+
+/* ================= GEOLOCALIZAÇÃO (mapa do Brasil) =================
+   O mapa (js/mapa.js) já mostra os estados e as cidades onde os equipamentos estão (campos UF e Cidade).
+   Coordenadas das cidades: tabela do IBGE embutida (js/brasil-cidades.js). Para ligar a um geolocalizador,
+   complete os pontos marcados com [GEOLOCALIZADOR n]:
+     1 GEO_EXTRA / coordCidade (coordenadas)   2 Geolocalizador.localizar (serviço)   3 dadosMapa (pontos no mapa)
+     4 geoBuscar (campo de busca)               5 evento mapa:estado                    6 Mapa.irPara (js/mapa.js)
+     7 pontos extras desenhados (js/mapa.js)    8 evento mapa:cidade                    9 lat/lon por registro (geoDe) */
+/* >>> [GEOLOCALIZADOR 1] TABELA EXTRA de coordenadas para cidades que não estão na tabela do IBGE ou locais
+ *     específicos. Chave: 'UF|cidade' (sem acento, minúsculas). Futuro: preencher pelo geolocalizador/BD.
+ *     Formato: { 'ma|sao luis': { lat: -2.53, lon: -44.28 } } */
+const GEO_EXTRA = {};
+function coordCidade(uf, cidade) {
+  const c = cidadesDe(uf).find((x) => semAcento(x[0]) === semAcento(cidade));
+  if (c) return { lat: c[1], lon: c[2] };
+  return GEO_EXTRA[uf.toLowerCase() + '|' + semAcento(cidade)] || null;
+}
+/* >>> [GEOLOCALIZADOR 2] SERVIÇO DE GEOCODIFICAÇÃO (texto -> coordenadas). Troque o corpo pela chamada real,
+ *     ex.: fetch('/api/geo?q=' + encodeURIComponent(texto)). Deve devolver { lat, lon, rotulo? }. */
+const Geolocalizador = {
+  localizar: async () => {
+    throw new Error('Geolocalizador não conectado.');
+  },
+};
+/* >>> [GEOLOCALIZADOR 9] LOCAL DO EQUIPAMENTO: última transferência (destino) ou o próprio cadastro.
+ *     Se o registro tiver lat/lon numéricos (futuro: gravados pelo geolocalizador), eles têm prioridade. */
+function geoDe(e) {
+  const o = lastT(t(e.tomb)) || e,
+    num = (x) => (x === '' || x == null || isNaN(+x) ? null : +x);
+  return { uf: t(o.uf), cidade: t(o.cidade), lat: num(o.lat), lon: num(o.lon) };
+}
+/* >>> [GEOLOCALIZADOR 3] PONTOS DO MAPA: equipamentos (não baixados) por estado e por cidade. */
+function dadosMapa() {
+  const estados = {},
+    pontos = {};
+  let sem = 0,
+    semCoord = 0,
+    total = 0;
+  db.novo
+    .filter((r) => t(r.equip) && situ(r) !== 'Baixado')
+    .forEach((r) => {
+      const g = geoDe(r);
+      total++;
+      if (!g.uf) {
+        sem++;
+        return;
+      }
+      estados[g.uf] = (estados[g.uf] || 0) + 1;
+      if (!g.cidade && g.lat == null) return;
+      const c = g.lat != null ? { lat: g.lat, lon: g.lon } : coordCidade(g.uf, g.cidade);
+      if (!c) {
+        semCoord++;
+        return;
+      }
+      const id = g.uf + '|' + (g.cidade || c.lat + ',' + c.lon);
+      (pontos[id] = pontos[id] || {
+        id,
+        uf: g.uf,
+        cidade: g.cidade,
+        lat: c.lat,
+        lon: c.lon,
+        valor: 0,
+      }).valor++;
+    });
+  const lista = Object.values(pontos).map((p) => ({
+    ...p,
+    rotulo: `${p.cidade || 'Ponto'} / ${p.uf} · ${p.valor} equip.`,
+  }));
+  return { estados, pontos: lista, sem, semCoord, total };
+}
+async function geoBuscar() {
+  const q = t($('#geo_busca').value),
+    el = $('#geo_msg');
+  if (!q) {
+    el.textContent = 'Digite um local.';
+    return;
+  }
+  try {
+    const r = await Geolocalizador.localizar(q); // [GEOLOCALIZADOR 2]
+    Mapa.setDados({
+      estados: mapaDados.estados,
+      pontos: [
+        ...mapaDados.pontos,
+        { id: 'busca', rotulo: r.rotulo || q, lat: r.lat, lon: r.lon, valor: 1, extra: true },
+      ],
+    });
+    Mapa.irPara(r.lat, r.lon, 6); // [GEOLOCALIZADOR 6]
+    el.className = 'msg ok';
+    el.textContent = '✔ ' + (r.rotulo || q);
+  } catch (e) {
+    el.className = 'msg er';
+    el.textContent = '⚠ ' + e.message;
+  }
+}
+const verEstado = (uf, cidade) => {
+  ff = { uf, cidade: cidade || '' };
+  go('eq');
+};
+function infoEstado() {
+  const el = $('#mapa_info');
+  if (!el) return;
+  const e = Mapa.estados.find((x) => x.uf === ufSel);
+  if (!e) {
+    el.innerHTML = '<span class="m">Clique em um estado do mapa.</span>';
+    return;
+  }
+  const cid = mapaDados.pontos
+    .filter((p) => p.uf === e.uf && !p.extra)
+    .sort((a, b) => b.valor - a.valor);
+  el.innerHTML = /* HTML */ `<b>${h(e.nome)} (${e.uf})</b><br /><span class="m"
+      >${h(e.regiao)} · ${mapaDados.estados[e.uf] || 0} equipamento(s)</span
+    >
+    <p>
+      <button
+        class="btn p"
+        onclick="verEstado('${e.uf}')"
+        ${mapaDados.estados[e.uf] ? '' : 'disabled'}
+      >
+        Ver equipamentos
+      </button>
+    </p>
+    ${cid.length ? '<div class="m">Cidades:</div>' : ''}
+    ${cid.map((p) => /* HTML */ `<button class="btn" style="margin:0 6px 6px 0" data-uf="${p.uf}" data-cid="${h(p.cidade)}" onclick="verEstado(this.dataset.uf, this.dataset.cid)">${h(p.cidade || 'Ponto')} · ${p.valor}</button>`).join('')}`;
+}
+function iniciarMapa() {
+  mapaDados = dadosMapa();
+  Mapa.montar($('#mapa'));
+  Mapa.setDados(mapaDados);
+  ufSel = Mapa.estado().estado;
+  $('#mapa_resumo').innerHTML = /* HTML */ `<b>${mapaDados.total - mapaDados.sem}</b> equipamento(s)
+    no mapa<br />
+    <b>${mapaDados.pontos.length}</b> cidade(s) marcadas<br />
+    <b>${mapaDados.sem}</b> sem estado
+    informado${mapaDados.semCoord ? `<br /><b>${mapaDados.semCoord}</b> em cidade sem coordenadas` : ''}`;
+  infoEstado();
+}
+document.addEventListener('mapa:estado', (e) => {
+  ufSel = e.detail ? e.detail.uf : ''; // [GEOLOCALIZADOR 5] ponto de ligação: estado clicado (uf, nome, região, total)
+  infoEstado();
+});
+document.addEventListener('mapa:cidade', (e) => {
+  verEstado(e.detail.uf, e.detail.cidade); // [GEOLOCALIZADOR 8] clicou numa cidade: abre os equipamentos dela
+});
 
 /* ================= TELAS ================= */
 const TABS = [
@@ -304,12 +544,18 @@ const go = (k) => {
   tab = k;
   render();
 };
+const abrir = (k) => {
+  ctomb = k;
+  go('dash');
+};
 const COLS = {
   novo: [
     ['equip', 'Equipamento'],
     ['marca', 'Marca'],
     ['tomb', 'Tombamento'],
     ['unid', 'Unidade/Setor'],
+    ['uf', 'UF', 'uf'],
+    ['cidade', 'Cidade'],
     ['nf', 'Nota fiscal'],
     ['dcomp', 'Data compra', 'date'],
     ['val', 'Validado', 'bool'],
@@ -319,6 +565,8 @@ const COLS = {
     ['tomb', 'Tombamento'],
     ['orig', 'Origem'],
     ['dest', 'Destino'],
+    ['uf', 'UF destino', 'uf'],
+    ['cidade', 'Cidade destino'],
     ['resp', 'Responsável'],
     ['obs', 'Observação'],
     ['val', 'Validado', 'bool'],
@@ -336,8 +584,29 @@ function render() {
   ).join('');
   $('#app').innerHTML =
     tab === 'dash' ? dash() : tab === 'eq' ? eqv() : tab === 'dados' ? dados() : grid(tab);
-  if (tab === 'dash') cons();
+  if (tab === 'dash') {
+    cons();
+    iniciarMapa();
+  }
 }
+const selUF = (id, l, extra = '') =>
+  /* HTML */ `<label for="${id}">${l}</label
+    ><select id="${id}">
+      <option value="">${extra}</option>
+      ${UFS.map((u) => `<option value="${u.uf}">${u.uf} · ${u.nome}</option>`).join('')}
+    </select>`;
+const popularCidades = (p) => {
+  const el = $('#dl_cid_' + p),
+    s = $('#' + p + '_uf');
+  if (el && s)
+    el.innerHTML = cidadesDe(s.value)
+      .map((c) => `<option value="${h(c[0])}">`)
+      .join('');
+};
+document.addEventListener('change', (e) => {
+  const m = /^(n|t|c)_uf$/.exec(e.target.id || '');
+  if (m) popularCidades(m[1]);
+});
 const inp = (id, l, o = {}) =>
   /* HTML */ `<label for="${id}">${l}</label
     ><input
@@ -392,13 +661,46 @@ function dash() {
   return /* HTML */ `<div class="grid k">
       ${kp.map(([l, v, c]) => /* HTML */ `<div class="card kp ${c}"><b>${v}</b><span>${l}</span></div>`).join('')}
     </div>
+    <div class="card mapa-card">
+      <div class="mapa-lado">
+        <h2>📍 Localizar</h2>
+        <!-- >>> [GEOLOCALIZADOR 4] CAMPO DE BUSCA: chama geoBuscar() -> Geolocalizador.localizar() (js/painel.js) -->
+        <div class="row">
+          <input
+            id="geo_busca"
+            placeholder="Endereço, cidade ou local"
+            autocomplete="off"
+            onkeydown="if (event.key === 'Enter') geoBuscar()"
+          />
+          <button class="btn p" onclick="geoBuscar()">Localizar</button>
+        </div>
+        <div class="msg er" id="geo_msg">Geolocalizador ainda não conectado.</div>
+        <h2 style="margin-top: 16px">Resumo</h2>
+        <div id="mapa_resumo" class="m"></div>
+      </div>
+      <div class="mapa-centro">
+        <div id="mapa" class="mapa" aria-label="Mapa do Brasil interativo"></div>
+        <div class="mapa-ctrl">
+          <button class="btn" title="Ampliar" onclick="Mapa.zoom(1.4)">＋</button>
+          <button class="btn" title="Reduzir" onclick="Mapa.zoom(1 / 1.4)">－</button>
+          <button class="btn" title="Mostrar o Brasil inteiro" onclick="Mapa.reset()">⌂</button>
+        </div>
+        <div class="m">Arraste para mover · role para ampliar · clique em um estado</div>
+      </div>
+      <div class="mapa-lado">
+        <h2>🗺️ Estado</h2>
+        <!-- >>> [GEOLOCALIZADOR 5] ESTADO selecionado (evento mapa:estado) e CIDADES com equipamentos (mapa:cidade) -->
+        <div id="mapa_info"></div>
+      </div>
+    </div>
     <div class="grid g2">
       <div class="card">
         <h2>➕ Novo equipamento</h2>
         <div class="f">
           ${inp('n_equip', 'Equipamento', { l: 'dl_eq' })}
           ${inp('n_marca', 'Marca', { l: 'dl_marca' })} ${inp('n_tomb', 'Tombamento')}
-          ${inp('n_unid', 'Unidade/Setor', { l: 'dl_unid' })} ${inp('n_nf', 'Nota fiscal')}
+          ${inp('n_unid', 'Unidade/Setor', { l: 'dl_unid' })} ${selUF('n_uf', 'Estado (UF)')}
+          ${inp('n_cidade', 'Cidade', { l: 'dl_cid_n' })} ${inp('n_nf', 'Nota fiscal')}
           ${inp('n_dcomp', 'Data da compra', { t: 'date' })}
         </div>
         <p><button class="btn g" onclick="act('n')">CADASTRAR</button></p>
@@ -409,7 +711,8 @@ function dash() {
         <div class="f">
           ${inp('t_data', 'Data', { t: 'date' })} ${inp('t_tomb', 'Tombamento', { l: 'dl_tomb' })}
           ${inp('t_orig', 'Origem', { l: 'dl_unid', p: 'vazio = local atual' })}
-          ${inp('t_dest', 'Destino', { l: 'dl_unid' })} ${inp('t_resp', 'Responsável')}
+          ${inp('t_dest', 'Destino', { l: 'dl_unid' })} ${selUF('t_uf', 'Estado destino')}
+          ${inp('t_cidade', 'Cidade destino', { l: 'dl_cid_t' })} ${inp('t_resp', 'Responsável')}
           ${inp('t_obs', 'Observação')}
         </div>
         <div class="m" id="t_hint" style="margin-top:6px"></div>
@@ -500,6 +803,8 @@ function dash() {
       </div>
     </div>
     ${dl('dl_tomb', uniq('tomb'))}
+    <datalist id="dl_cid_n"></datalist><datalist id="dl_cid_t"></datalist
+    ><datalist id="dl_cid_c"></datalist>
     ${dl('dl_eq', [...new Set([...TIPOS.map((x) => x[0].split(' / ')[0]), ...uniq('equip')])])}
     ${dl('dl_marca', uniq('marca'))}
     ${dl('dl_unid', [...new Set([...uniq('unid'), ...db.transf.map((r) => t(r.dest))].filter(Boolean))].sort())}`;
@@ -510,11 +815,12 @@ function cons() {
   const k = ctomb,
     row = db.novo.find((r) => t(r.tomb) === k),
     u = lastT(k);
-  const R = (l, a, id) =>
+  const g = row ? geoDe(row) : { uf: '', cidade: '' };
+  const R = (l, a, id, lista) =>
     /* HTML */ `<tr>
       <td class="m">${l}</td>
       <td><b>${h(a)}</b></td>
-      <td>${id ? /* HTML */ `<input id="c_${id}" />` : ''}</td>
+      <td>${id ? /* HTML */ `<input id="c_${id}" ${lista ? `list="${lista}"` : ''} />` : ''}</td>
     </tr>`;
   if (!k || !row) {
     el.innerHTML = /* HTML */ `<p class="m">
@@ -539,6 +845,18 @@ function cons() {
       </tr>
       ${R('Origem (última transf.)', u ? u.orig : '', 'orig')} ${R('Local atual', loc(row), 'dest')}
       ${R('Data da última transf.', u ? D(u.data) : '', 'data')}
+      <tr>
+        <td class="m">Estado (UF) do local atual</td>
+        <td><b>${h(g.uf)}</b></td>
+        <td>
+          <select id="c_uf">
+            <option value=""></option>
+            <option value="-">(apagar)</option>
+            ${UFS.map((u) => `<option value="${u.uf}">${u.uf} · ${u.nome}</option>`).join('')}
+          </select>
+        </td>
+      </tr>
+      ${R('Cidade do local atual', g.cidade, 'cidade', 'dl_cid_c')}
       ${R('Nº de transferências', db.transf.filter((r) => t(r.tomb) === k).length)}
     </table>
     ${dup(row) ? '<p class="dup">⚠ Tombamento duplicado no cadastro.</p>' : ''}`;
@@ -556,6 +874,8 @@ function act(w) {
       marca: v('n_marca'),
       tomb: v('n_tomb'),
       unid: v('n_unid'),
+      uf: v('n_uf'),
+      cidade: v('n_cidade'),
       nf: v('n_nf'),
       dcomp: v('n_dcomp'),
     });
@@ -565,6 +885,8 @@ function act(w) {
       tomb: v('t_tomb'),
       orig: v('t_orig'),
       dest: v('t_dest'),
+      uf: v('t_uf'),
+      cidade: v('t_cidade'),
       resp: v('t_resp'),
       obs: v('t_obs'),
     });
@@ -582,7 +904,13 @@ function act(w) {
         dcomp: v('c_dcomp'),
         val: v('c_val'),
       },
-      { orig: v('c_orig'), dest: v('c_dest'), data: v('c_data') },
+      {
+        orig: v('c_orig'),
+        dest: v('c_dest'),
+        data: v('c_data'),
+        uf: v('c_uf'),
+        cidade: v('c_cidade'),
+      },
     );
     if (r.ok) ctomb = r.k;
   }
@@ -603,13 +931,16 @@ document.addEventListener('input', (e) => {
 function eqv() {
   const L = db.novo
     .filter((r) => t(r.equip))
-    .map((r) => ({ r, s: situ(r), l: lastT(t(r.tomb)) }))
+    .map((r) => ({ r, s: situ(r), l: lastT(t(r.tomb)), g: geoDe(r) }))
     .filter(
       (x) =>
         (!fs || x.s === fs) &&
+        (!ff.uf || x.g.uf === ff.uf) &&
+        (!ff.cidade || x.g.cidade === ff.cidade) &&
         (!fq ||
           JSON.stringify(Object.values(x.r)).toLowerCase().includes(fq) ||
-          n(loc(x.r)).includes(fq)),
+          n(loc(x.r)).includes(fq) ||
+          n(x.g.cidade).includes(fq)),
     );
   return /* HTML */ `<div class="card">
     <div class="row">
@@ -622,15 +953,20 @@ function eqv() {
         <option value="">Todas as situações</option>
         ${SIT.map((s) => /* HTML */ `<option ${s === fs ? 'selected' : ''}>${s}</option>`).join('')}</select
       ><span class="m">${L.length} equipamentos · clique numa linha para consultar/corrigir</span>
+      ${ff.uf || ff.cidade ? /* HTML */ `<span class="badge Transferido">Mapa: ${h(ff.uf)}${ff.cidade ? ' · ' + h(ff.cidade) : ''} <button class="btn" style="padding:0 6px" onclick="ff={uf:'',cidade:''};render()">✕</button></span>` : ''}
     </div>
     <div class="tw">
       <table>
         <tr>
-          ${['Tombamento', 'Equipamento', 'Marca', 'Unidade/Setor', 'Situação', 'Origem', 'Local atual', 'Data transf.', 'Nota fiscal', 'Data compra', 'Validado', 'Alerta'].map((c) => /* HTML */ `<th>${c}</th>`).join('')}
+          ${['Tombamento', 'Equipamento', 'Marca', 'Unidade/Setor', 'Situação', 'Origem', 'Local atual', 'UF', 'Cidade', 'Data transf.', 'Nota fiscal', 'Data compra', 'Validado', 'Alerta'].map((c) => /* HTML */ `<th>${c}</th>`).join('')}
         </tr>
         ${L.map(
-          ({ r, s, l }) =>
-            /* HTML */ `<tr style="cursor:pointer" onclick="ctomb='${h(t(r.tomb))}';go('dash')">
+          ({ r, s, l, g }) =>
+            /* HTML */ `<tr
+              style="cursor:pointer"
+              data-tomb="${h(t(r.tomb))}"
+              onclick="abrir(this.dataset.tomb)"
+            >
               <td>${h(t(r.tomb) || '—')}</td>
               <td>${h(t(r.equip))}</td>
               <td>${h(t(r.marca))}</td>
@@ -638,6 +974,8 @@ function eqv() {
               <td><span class="badge ${cl(s)}">${s}</span></td>
               <td>${l ? h(l.orig) : ''}</td>
               <td>${h(loc(r))}</td>
+              <td>${h(g.uf)}</td>
+              <td>${h(g.cidade)}</td>
               <td>${l ? D(l.data) : ''}</td>
               <td>${h(t(r.nf))}</td>
               <td>${D(r.dcomp)}</td>
@@ -649,6 +987,11 @@ function eqv() {
     </div>
   </div>`;
 }
+const selUFgrade = (k, i, f, v) =>
+  /* HTML */ `<select data-t="${k}" data-i="${i}" data-k="${f}">
+    <option value=""></option>
+    ${UFS.map((u) => `<option value="${u.uf}" ${u.uf === t(v) ? 'selected' : ''}>${u.uf}</option>`).join('')}
+  </select>`;
 function grid(k) {
   const C = COLS[k];
   return /* HTML */ `<div class="card">
@@ -671,7 +1014,7 @@ function grid(k) {
             (r, i) =>
               /* HTML */ `<tr>
                 <td class="m">${i + 2}</td>
-                ${C.map(([f, , ty]) => /* HTML */ `<td>${ty === 'bool' ? /* HTML */ `<input type="checkbox" data-t="${k}" data-i="${i}" data-k="${f}" ${r[f] === true ? 'checked' : ''} />` : /* HTML */ `<input type="${ty || 'text'}" data-t="${k}" data-i="${i}" data-k="${f}" value="${h(r[f])}" />`}</td>`).join('')}
+                ${C.map(([f, , ty]) => /* HTML */ `<td>${ty === 'uf' ? selUFgrade(k, i, f, r[f]) : ty === 'bool' ? /* HTML */ `<input type="checkbox" data-t="${k}" data-i="${i}" data-k="${f}" ${r[f] === true ? 'checked' : ''} />` : /* HTML */ `<input type="${ty || 'text'}" data-t="${k}" data-i="${i}" data-k="${f}" value="${h(r[f])}" />`}</td>`).join('')}
                 <td><button class="btn" onclick="del('${k}',${i})">✕</button></td>
               </tr>`,
           )
@@ -708,6 +1051,12 @@ function renomearLinha(r, nw) {
       'O tombamento ' +
         old +
         ' está duplicado e tem transferência/baixa; não dá para saber a qual se referem. Nada foi gravado.',
+    );
+  if (!nw && (rt.length || rb.length))
+    return er(
+      'Não dá para apagar o tombamento ' +
+        old +
+        ': há transferência/baixa ligada a ele. Nada foi gravado.',
     );
   r.tomb = nw;
   if (oc === 1) rt.concat(rb).forEach((z) => (z.tomb = nw));
@@ -775,19 +1124,168 @@ const csv = (k) =>
 /* >>> [SERVIDOR/BD 9] IMPORTAR JSON: substitui db inteiro e chama save(). Com BD, enviar para o servidor
  *     validar e gravar em lote.
  */
+/* ---------- importação de JSON ----------
+   Aceita (1) o backup do próprio painel {novo, transf, baixa} e (2) listas de linhas exportadas da
+   planilha (ex.: aba "Novo Tombamento" convertida de CSV para JSON). Reconhece a tabela pelas colunas. */
+const CAMPOS = {
+  novo: {
+    equipamento: 'equip',
+    marca: 'marca',
+    tombamento: 'tomb',
+    'unidade/setor': 'unid',
+    unidade: 'unid',
+    setor: 'unid',
+    uf: 'uf',
+    estado: 'uf',
+    cidade: 'cidade',
+    municipio: 'cidade',
+    'nota fiscal': 'nf',
+    'data compra': 'dcomp',
+    'validado patrimonio': 'val',
+  },
+  transf: {
+    data: 'data',
+    tombamento: 'tomb',
+    origem: 'orig',
+    destino: 'dest',
+    'uf destino': 'uf',
+    'estado destino': 'uf',
+    uf: 'uf',
+    estado: 'uf',
+    'cidade destino': 'cidade',
+    cidade: 'cidade',
+    responsavel: 'resp',
+    observacao: 'obs',
+    'validado patrimonio': 'val',
+  },
+  baixa: {
+    'numero tombamento': 'tomb',
+    tombamento: 'tomb',
+    data: 'data',
+    'validado patrimonio': 'val',
+  },
+};
+const MOLDE = {
+  novo: () => ({
+    equip: '',
+    marca: '',
+    tomb: '',
+    unid: '',
+    uf: '',
+    cidade: '',
+    nf: '',
+    dcomp: '',
+    val: false,
+  }),
+  transf: () => ({
+    data: '',
+    tomb: '',
+    orig: '',
+    dest: '',
+    uf: '',
+    cidade: '',
+    resp: '',
+    obs: '',
+    val: false,
+  }),
+  baixa: () => ({ tomb: '', data: '', val: false }),
+};
+const NOMES = { novo: 'Novo Tombamento', transf: 'Transferência', baixa: 'Baixa' };
+const detectar = (c) =>
+  c.includes('origem') && c.includes('destino')
+    ? 'transf'
+    : c.includes('equipamento')
+      ? 'novo'
+      : c.includes('numero tombamento') || (c.includes('tombamento') && c.includes('data'))
+        ? 'baixa'
+        : null;
+const dataImp = (v) => {
+  const x = t(v).split(/[ T]/)[0];
+  return x ? pd(x) : '';
+};
+function converter(tabela, linhas) {
+  const r = { rows: [], vazias: 0, datas: [], ufs: 0 };
+  linhas.forEach((l, idx) => {
+    const o = {};
+    Object.entries(l).forEach(([k, v]) => {
+      const c = CAMPOS[tabela][semAcento(k)];
+      if (!c) return;
+      if (c === 'val') o.val = v === true || ['true', 'sim', '1', 'verdadeiro'].includes(n(v));
+      else if (c === 'dcomp' || c === 'data') {
+        o[c] = dataImp(v);
+        if (t(v) && !o[c]) r.datas.push(t(l.Tombamento ?? l.tombamento) || 'linha ' + (idx + 2));
+      } else if (c === 'uf') {
+        o.uf = normUF(v) || '';
+        if (t(v) && !o.uf) r.ufs++;
+      } else o[c] = t(v);
+    });
+    if (Object.entries(o).every(([k, v]) => k === 'val' || v === '')) r.vazias++;
+    else r.rows.push({ ...MOLDE[tabela](), ...o });
+  });
+  return r;
+}
+function interpretar(d) {
+  if (d && !Array.isArray(d) && ['novo', 'transf', 'baixa'].every((k) => Array.isArray(d[k])))
+    return { backup: true, tabelas: { novo: d.novo, transf: d.transf, baixa: d.baixa }, info: [] };
+  const listas = Array.isArray(d)
+    ? [['', d]]
+    : d && typeof d === 'object'
+      ? Object.entries(d).filter(([, v]) => Array.isArray(v))
+      : [];
+  if (!listas.length)
+    return {
+      erro: 'Formato não reconhecido: esperado o backup do painel ou uma lista de linhas da planilha.',
+    };
+  const tabelas = {};
+  const info = [];
+  for (const [, linhas] of listas) {
+    const objs = linhas.filter((l) => l && typeof l === 'object' && !Array.isArray(l));
+    if (!objs.length)
+      return { erro: 'A lista do arquivo está vazia ou não tem linhas com colunas.' };
+    const cols = [...new Set(objs.slice(0, 20).flatMap((l) => Object.keys(l)))];
+    const tabela = detectar(cols.map(semAcento));
+    if (!tabela)
+      return {
+        erro: `Não reconheci as colunas (${cols.slice(0, 6).join(', ')}). Esperado, por exemplo: EQUIPAMENTO, Marca, Tombamento, Unidade/Setor, NOTA FISCAL, DATA COMPRA, VALIDADO PATRIMONIO.`,
+      };
+    if (tabelas[tabela]) continue;
+    const c = converter(tabela, objs);
+    tabelas[tabela] = c.rows;
+    info.push(
+      `${NOMES[tabela]}: ${c.rows.length} linhas` +
+        (c.vazias ? `, ${c.vazias} em branco ignoradas` : '') +
+        (c.ufs ? `, ${c.ufs} UF inválida(s) deixada(s) vazia(s)` : '') +
+        (c.datas.length
+          ? `, ${c.datas.length} data(s) inválida(s) deixada(s) vazia(s) (${c.datas.slice(0, 5).join(', ')})`
+          : ''),
+    );
+  }
+  return { tabelas, info };
+}
 const imp = (i) => {
   const f = i.files[0];
   if (!f) return;
   f.text().then((x) => {
+    i.value = '';
+    let d;
     try {
-      const d = JSON.parse(x);
-      if (!d.novo || !d.transf || !d.baixa) throw 0;
-      db = d;
-      save();
-      render();
-      toast('✔ Dados importados.');
+      d = JSON.parse(x.replace(/^\uFEFF/, ''));
     } catch {
-      toast('⚠ Arquivo inválido.');
+      toast('⚠ O arquivo não é um JSON válido.');
+      return;
     }
+    const r = interpretar(d);
+    if (r.erro) {
+      toast('⚠ ' + r.erro);
+      return;
+    }
+    const nomes = Object.keys(r.tabelas)
+      .map((k) => `${NOMES[k]} (${r.tabelas[k].length} linhas)`)
+      .join(', ');
+    if (!confirm(`Substituir os dados atuais de: ${nomes}?`)) return;
+    db = { ...db, ...r.tabelas };
+    save();
+    render();
+    toast('✔ Importado. ' + (r.backup ? nomes : r.info.join(' · ')));
   });
 };

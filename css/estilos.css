@@ -258,8 +258,87 @@ td input {
   max-width: 420px;
   z-index: 9;
 }
+/* ===== Mapa do Brasil ===== */
+.mapa-card {
+  display: grid;
+  grid-template-columns: 260px 1fr 260px;
+  gap: 14px;
+  align-items: start;
+}
+.mapa-centro {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.mapa {
+  position: relative;
+  width: min(100%, 560px);
+  touch-action: none;
+  user-select: none;
+}
+.mp-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  cursor: grab;
+}
+.mapa.arrastando .mp-svg {
+  cursor: grabbing;
+}
+.mp-estado {
+  stroke: #0b1220;
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+  transition: filter 0.12s;
+}
+.mp-estado:hover {
+  filter: brightness(1.35);
+}
+.mp-uf {
+  fill: #e6edf7;
+  font-weight: 700;
+  opacity: 0.8;
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: #0b1220;
+  stroke-width: 0.2em;
+}
+.mp-ponto {
+  stroke: #fff;
+  stroke-width: 1.5px;
+  vector-effect: non-scaling-stroke;
+  cursor: pointer;
+}
+.mp-tip {
+  position: absolute;
+  display: none;
+  background: #0b1424;
+  border: 1px solid var(--bl);
+  padding: 6px 10px;
+  border-radius: 8px;
+  pointer-events: none;
+  font-size: 12px;
+  z-index: 2;
+  max-width: 260px;
+}
+.mapa-ctrl {
+  display: flex;
+  gap: 6px;
+}
+.mapa-ctrl .btn {
+  padding: 4px 11px;
+}
+.mapa-lado .row input {
+  min-width: 0;
+  flex: 1;
+}
+
 /* ===== Responsivo ===== */
 @media (max-width: 1150px) {
+  .mapa-card {
+    grid-template-columns: 1fr;
+  }
   .k {
     grid-template-columns: repeat(3, 1fr);
   }
